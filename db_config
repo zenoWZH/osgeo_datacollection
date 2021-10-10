@@ -1,0 +1,4 @@
+host="localhost"
+user="osgeo"
+password="data"
+database="osgeo"
