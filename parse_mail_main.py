@@ -5,7 +5,7 @@ import tarfile
 import gzip
 import email, codecs
 import time
-import modin.pandas as pd
+import pandas as pd
 import numpy as np
 import gc
 import logging
@@ -24,9 +24,16 @@ db_config.close()
 conn = pg8000.connect(host=dbHOST,user=dbUSER,password=dbPASS,database=dbDB)
 conn.commit()
 
+from sqlalchemy import create_engine
+from sqlalchemy import types as sqltype
+from config.database import HOST, PORT, USER, PASSWORD, DATABASE
+
+psql_engine = create_engine("postgresql://"+USER+":"+PASSWORD+"@"+HOST+":"+str(PORT)+"/"+DATABASE)
 
 
-
+def escape(s):
+    return (s).replace("'", "''").replace('%', '%%').replace('<','').replace('>','')
+    
 def read_into_buffer(filename):
     buf = bytearray(os.path.getsize(filename))
     with open(filename, 'rb') as f:
@@ -113,8 +120,64 @@ def file_line_number(file):
     return i + 1
 
 
+
+
+def time_filename(file_csv_route):
+    try:
+        file_month = file_csv_route.split('/')[-1].split('.')[0]
+        #time_format = "%Y-%B"
+        #str_time = file_month.split('.')[0]
+        #time_struct = time.strptime(str_time, time_format)
+        #timeStamp = pd.Timestamp(time_struct)
+
+        timeStamp = pd.Timestamp(file_month)    #pandas powerful!
+        return timeStamp
+    except BaseException as err:
+        print(err)
+        return 0
+
+def time_parse(message_date):
+    
+    try:
+        time_format = "%a %b %d %H:%M:%S %Y"
+        tsp = time.strptime(message_date, time_format)
+    except ValueError as e:
+        try:
+            time_format =  "%a %d %b %Y %H:%M:%S %z "
+            tsp = time.strptime(message_date.split('(')[0].replace(",",""), time_format)
+        except ValueError as e:
+            try:
+                time_format =  "%a %d %b %Y %H:%M:%S %z"
+                tsp = time.strptime(message_date.split('(')[0].replace(",",""), time_format)
+            except ValueError as e:
+                try:
+                    time_format =  "%d %b %Y %H:%M:%S %z"
+                    tsp = time.strptime(message_date.split('(')[0].replace(",",""), time_format)
+                except ValueError as e:
+                    try:
+                        time_format = "%a %d %b %Y %H:%M:%S"
+                        tsp = time.strptime(message_date.split('(')[0][:-5].replace(",",""), time_format)
+                    except ValueError as e:
+                        try:
+                            time_format = "%a %d %b %Y %H:%M "
+                            tsp = time.strptime(message_date.split('(')[0][:-5].replace(",",""), time_format)
+                        except ValueError as e:
+                            try:
+                                time_format = "%a %b %d %H:%M:%S %Y"
+                                tsp = time.strptime(message_date.split('(')[0][:-5].replace(",",""), time_format)
+                            except BaseException as err:
+                                    print(err, "Return timestamp as 0")
+                                    #flag = True
+                                    return 0
+    time_format = "%Y-%m-%d %H:%M:%S"
+    return(pd.Timestamp(time.strftime(time_format, tsp)))
+
+
+
+  
+
 def getMonthContent(path):
-    print(path)
+    #print(path)
     messages = []
     messageText=""
     try:
@@ -205,31 +268,42 @@ def add_thread(messages, pjname):
     except Exception as e:
         logging.error("Database connect error:%s" % e)
         return
-    counter = 0
-    counter_message = 0
-    for message in messages:
-        counter_message +=1
-        if "references" in message:
-            counter+=1
-            thread_id_old = escape(message["references"].split()[-1]+"__"+pjname)
-            project_id = escape(pjname)
-            thread_id = escape(project_id+"#"+str(counter)+"#"+message["references"].split()[-1])
+    
 
-            sql_remove = """DELETE FROM thread WHERE thread_id='%s' """ % (thread_id_old)
-            try:
-                db.commit()
-                cursor.execute(sql_remove)
-                db.commit()
-            except BaseException as err:
-                pass
-            
-        elif "message-id" in message:
-            project_id = escape(pjname)
-            thread_id = escape(project_id+"#"+str(counter_message)+"#"+message["message-id"].split()[-1])
-        else:
-            continue
-            
-        thread_type = "email"
+    project_id = escape(pjname)
+    
+    #OLD PART BELOW#
+    #    global counter_thread
+    #    global counter_message
+    #    for message in messages:
+    #        counter_message+= 1
+    #        if "references" in message:
+    #            
+    #            thread_id_old = escape(message["references"].split()[-1]+"__"+pjname)
+    #            
+    #            thread_id = escape(project_id+"#"+str(counter_thread)+"#"+message["references"].split()[-1])
+    #
+    #            sql_remove = """DELETE FROM thread WHERE thread_id='%s' """ % (thread_id_old)
+    #            try:
+    #                db.commit()
+    #                cursor.execute(sql_remove)
+    #                db.commit()
+    #            except BaseException as err:
+    #                pass
+    #            
+    #        elif "message-id" in message:
+    #            counter_thread+=1
+    #            project_id = escape(pjname)
+    #            thread_id = escape(project_id+"#"+str(counter_thread)+"#"+message["message-id"].split()[-1])
+    #        else:
+    #            counter_thread+= 1
+    #            thread_id= escape(pjname+"#"+str(counter_thread)+"#")
+    #            continue
+    #OLD PART ABOVE#
+    threads = messages["thread_id"].drop_duplicates().values
+    for thread_id in threads:
+
+        thread_type = "emails"
         thread_name = escape(project_id+thread_id.split('@')[0])
         #aliase_id, mailaddress = aliase.replace('<', ' ').replace('>', ' ').split()
         #thread_id = escape(thread_id)
@@ -260,12 +334,24 @@ def add_thread(messages, pjname):
 
 def checkAliase(conn, messages):
     
-    cursor = conn.cursor()
+    list_person = []
+    #list_mailaddress = []
+    #list_id = []
+
     for message in messages:
         if "from" in message:
             personname = email.utils.parseaddr(message["from"])[0]
             mailaddress = message["from"].split('(')[0].replace(' at ','@')
-            add_aliase(escape(personname+'_'+mailaddress), escape(personname), escape(mailaddress), "email")        
+            # NEED REDO with #!!!!!!!!!!!!!!
+            list_person.append([escape(personname+'_'+mailaddress), escape(personname), escape(mailaddress)])
+            #list_mailaddress.append(escape(mailaddress))
+            #list_id.append(escape(personname+'_'+mailaddress))
+
+    df_aliases = pd.DataFrame(list_person).drop_duplicates()
+
+    #add_aliase(escape(personname+'_'+mailaddress), escape(personname), escape(mailaddress), "email")
+    for id, name, mailadd in df_aliases.values:
+        add_aliase(id, name, mailadd, "emails") 
             
 
 def checkThread(conn, messages, pjname):
@@ -306,9 +392,8 @@ def checkThread(conn, messages, pjname):
             print (e)
             
         conn.commit()
-    
-def saveMessagetocsv(messages, csv_file, pjname):
-    
+
+def saveMessagetocsv(messages, csv_file, element):
     
     message_id = []
     thread_id = []
@@ -316,32 +401,55 @@ def saveMessagetocsv(messages, csv_file, pjname):
     author_name = []
     message_text = []
     timestamp = []
-    counter = 0
+    global counter_thread
+    global dict_thread
+    global counter_message
     for message in messages:
         #flag = False
-        counter+=1
+        counter_message+= 1
         if "from" in message:
             personname = email.utils.parseaddr(message["from"])[0]
             #personname = asciiCodify(personname)  #不可用
             mailaddress = message["from"].split('(')[0].replace(' at ','@')
 
-            author_aliase_id.append(personname+'_'+mailaddress)
-            author_name.append(personname)
+            author_aliase_id.append(escape(personname+'_'+mailaddress))
+            author_name.append(escape(personname))
         else:
             continue
 
         try:
             if "message-id" in message:
-                message_id.append(escape(pjname+"#"+str(counter)+"#"+message["message-id"]))
+                message_id.append(escape(element+"#"+str(counter_message)+"#"+message["message-id"]))
+            else:
+                message_id.append(escape(element+"#"+str(counter_message)+"#"))
         except BaseException as e:
             print(e)
-            message_id.append("")
-            
+            message_id.append(escape(element+"#"+str(counter_message)+"#"))
+        #print(message_id[-1])
 
         if "references" in message:
-            thread_id.append(escape(pjname+"#"+str(counter)+"#"+message["references"].split()[-1]))
+            reference = message["references"].split()[-1]
+            if reference in dict_thread:
+                thread_no = dict_thread[reference]
+                thread_id.append(escape(element+"#"+str(thread_no)+"#"+message["references"].split()[-1]))
+            else:
+                counter_thread+= 1
+                thread_no = counter_thread
+                dict_thread[reference] = thread_no
+                thread_id.append(escape(element+"#"+str(thread_no)+"#"+message["references"].split()[-1]))
+        elif "message-id" in message:
+            reference = message["message-id"]
+            counter_thread+= 1
+            thread_no = counter_thread
+            dict_thread[reference] = thread_no
+            thread_id.append(escape(element+"#"+str(thread_no)+"#"+message["message-id"]))
         else:
-            thread_id.append('')
+            counter_thread+= 1
+            thread_no = counter_thread
+            dict_thread[reference] = thread_no
+            thread_id.append(escape(element+"#"+str(thread_no)+"#"))
+        
+        
 
         message_text.append(escape(message.__str__()))
 
@@ -349,39 +457,9 @@ def saveMessagetocsv(messages, csv_file, pjname):
             try:
                 timestamp.append(pd.Timestamp(message["date"]))
             except BaseException as err:
-                print(err)
-                time_format = "%a %b %d %H:%M:%S %Y"
-                try:
-                    tsp = time.strptime(message["date"], time_format)
-                except ValueError as e:
-                    try:
-                        time_format =  "%a %d %b %Y %H:%M:%S %z "
-                        tsp = time.strptime(message["date"].split('(')[0].replace(",",""), time_format)
-                    except ValueError as e:
-                        try:
-                            time_format =  "%a %d %b %Y %H:%M:%S %z"
-                            tsp = time.strptime(message["date"].split('(')[0].replace(",",""), time_format)
-                        except ValueError as e:
-                            try:
-                                time_format =  "%d %b %Y %H:%M:%S %z"
-                                tsp = time.strptime(message["date"].split('(')[0].replace(",",""), time_format)
-                            except ValueError as e:
-                                try:
-                                    time_format = "%a %d %b %Y %H:%M:%S"
-                                    tsp = time.strptime(message["date"].split('(')[0][:-5].replace(",",""), time_format)
-                                except ValueError as e:
-                                    try:
-                                        time_format = "%a %d %b %Y %H:%M "
-                                        tsp = time.strptime(message["date"].split('(')[0][:-5].replace(",",""), time_format)
-                                    except BaseException as e:
-                                            print(e)
-                                            #flag = True
-                                            timestamp.append(0)
-                                            continue
-            
-                
-                time_format = "%Y-%m-%d %H:%M:%S"
-                timestamp.append(pd.Timestamp(time.strftime(time_format, tsp)))
+                #print(err)
+                timestamp.append(max(time_filename(csv_file), time_parse(message["date"])))
+
             
         else:
             timestamp.append(0)
@@ -406,18 +484,30 @@ def saveMessagetocsv(messages, csv_file, pjname):
     df_message["thread_id"] = pd.Series(thread_id)
     df_message["author_aliase_id"] = pd.Series(author_aliase_id)
     df_message["author_name"] = pd.Series(author_name)
-    df_message["timestamp" ] = pd.Series(timestamp).apply(lambda x: pd.Timestamp(x))
+    df_message["timestamp" ] = pd.Series(timestamp)#.apply(lambda x: pd.Timestamp(x))
     df_message["message_text" ] = pd.Series(message_text)
     
     df_message.to_csv(csv_file)
+    return df_message
     
-# Main Function
+def dataframe_to_psql(data1):
+    
+    df_psql = data1.astype(str)
+    for col in df_psql.columns.values :
+        df_psql[col]= df_psql[col].apply(lambda x : x.encode('utf-8','ignore').decode("utf-8").replace("\x00", "\uFFFD"))
+    df_psql.to_sql(name='message', con = psql_engine, if_exists= 'append', index= False,chunksize=1)
 
+    print("Data Saved to psql!")
+
+
+# Main Function
+global counter_thread
+global counter_message
+global dict_thread
 # Unzip the txt files
 DIR = './raw'
 DIR_csv = './csv'
 filelist_in=os.listdir(DIR)
-
 
 ################################Check Project Exist
 
@@ -428,13 +518,22 @@ projs = set()
 cursor.execute("select proj_id from project")
 result=cursor.fetchall()
 for proj_id in result:
-    print(proj_id)
+    #print(proj_id)
     projs.add(proj_id[0])
 conn.commit()
     
-#for element in filelist_in[:1]:
+df_all = pd.DataFrame(columns =["message_id", "thread_id", "author_aliase_id", "author_name", "receivers_name", "message_text", "timestamp" ])
+
+#for element in filelist_in[11:12]:
 for element in filelist_in:
+    
+    print("Starting Folder:", element)
+    counter_thread = 0
+    counter_message = 0
+    dict_thread = {}
     element_messages = []
+    
+
     # Project name and write the log
     list_out=open("filelist.txt","w+")
     if ("-commit" in element) or ("-dev" in element):
@@ -442,7 +541,7 @@ for element in filelist_in:
     elif ("_commit" in element) or ("_dev" in element):
         pjname = element.split("_")[0]
     else:
-        pjname = element.split()[0]
+        pjname = element.split('-')[0]
     list_out.write(DIR+"/"+element+"\n")
     list_out.close()
     
@@ -464,41 +563,55 @@ for element in filelist_in:
     #    command = "gunzip "+f_gz_dir+' '+DIR+"/"+element+"/txtfile/"
     #    print(command)
     #    os.system(command)
- 
+    df_proj = pd.DataFrame(columns =["message_id", "thread_id", "author_aliase_id", "author_name", "receivers_name", "message_text", "timestamp" ])
     txtlist = os.listdir(DIR+"/"+element)
+
     for file_month in txtlist:
         
+        if not ('.txt' in file_month):
+            continue
+
+        if '.gz' in file_month:
+            continue
+        
+        
+        #print(file_month)
         messages = getMonthContent(DIR+"/"+element+'/'+file_month)
         #print(len(messages))
-        
+        element_messages.extend(messages)
+       
         try:
             conn.commit()
-            checkAliase(conn, messages)
-            add_thread(messages, pjname)
             csv_path = DIR_csv+"/"+element+'/'
             if not os.path.exists(csv_path):
                 os.makedirs(csv_path)
             csv_file = csv_path+file_month.replace(".txt",'')+".csv"
-            saveMessagetocsv( messages, csv_file, pjname)
+            #print(csv_file)
+            df_thismonth = saveMessagetocsv(messages, csv_file, element)
         except BaseException as e:
             print(e)
-        element_messages.extend(messages)
-    csv_file = csv_path+element+"_all.csv"    
-    saveMessagetocsv( element_messages, csv_file, pjname)
+
+        df_proj = df_proj.append(df_thismonth, ignore_index = True).drop_duplicates()
     
+    checkAliase(conn, element_messages)
+    add_thread(df_proj, pjname)
+
         
-        
-        
-        
-        
-        
-        
-        
-        
-        #Only Superuser can do
-        #conn.commit()
-        #sql = "COPY message(message_id, thread_id, author_aliase_id, author_name, message_text, timestamp) FROM" + \
-        #        "'"+ csv_file+ "' DELIMITER ',' CSV HEADER" 
-        #cursor.execute(sql)
-        #conn.commit()
+    csv_file = csv_path+element+"_all.csv"
+    df_all = df_all.append(df_proj, ignore_index = True)
+    df_proj.to_csv(csv_file)
+    # Drop Timezone!!!
+    df_proj["timestamp"] = df_proj["timestamp"].apply(lambda x: pd.Timestamp(x).tz_localize(None))    
+
+    try:
+        pass
+        # SAVE TO psql HERE!!!!!!!!!!!!
+    #    dataframe_to_psql(df_proj)
+    except BaseException as err:
+        print(err)
+        print(pjname)
+        break
+
     gc.collect()
+
+#df_all.to_csv('emails_all.csv')
