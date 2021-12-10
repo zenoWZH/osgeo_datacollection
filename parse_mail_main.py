@@ -8,7 +8,8 @@ import time
 import pandas as pd
 import numpy as np
 import gc
-import logging
+#import logging
+from tqdm import tqdm
 
 from config.database import HOST, PORT, USER, PASSWORD, DATABASE
 
@@ -30,10 +31,21 @@ from config.database import HOST, PORT, USER, PASSWORD, DATABASE
 
 psql_engine = create_engine("postgresql://"+USER+":"+PASSWORD+"@"+HOST+":"+str(PORT)+"/"+DATABASE)
 
+def un_gz(file_name):
+    f_name = file_name.replace(".gz","")
+    g_file = gzip.GzipFile(file_name)
+    open(f_name, "wb+").write(g_file.read())
+    g_file.close()
+
+    return(f_name)
+
+
 
 def escape(s):
     return (s).replace("'", "''").replace('%', '%%').replace('<','').replace('>','')
-    
+
+
+
 def read_into_buffer(filename):
     buf = bytearray(os.path.getsize(filename))
     with open(filename, 'rb') as f:
@@ -121,7 +133,6 @@ def file_line_number(file):
 
 
 
-
 def time_filename(file_csv_route):
     try:
         file_month = file_csv_route.split('/')[-1].split('.')[0]
@@ -171,7 +182,6 @@ def time_parse(message_date):
                                     return 0
     time_format = "%Y-%m-%d %H:%M:%S"
     return(pd.Timestamp(time.strftime(time_format, tsp)))
-
 
 
   
@@ -232,7 +242,7 @@ def add_aliase(aliase_id, personname, mailaddress, source):
             #charset='utf8')
         cursor = db.cursor()
     except Exception as e:
-        logging.error("Database connect error:%s" % e)
+        print("Database connect error:%s" % e)
 
     #aliase_id, mailaddress = aliase.replace('<', ' ').replace('>', ' ').split()
     aliase_id = escape(aliase_id)
@@ -266,7 +276,7 @@ def add_thread(messages, pjname):
             #charset='utf8')
         cursor = db.cursor()
     except Exception as e:
-        logging.error("Database connect error:%s" % e)
+        print("Database connect error:%s" % e)
         return
     
 
@@ -302,7 +312,8 @@ def add_thread(messages, pjname):
     #OLD PART ABOVE#
     threads = messages["thread_id"].drop_duplicates().values
     for thread_id in threads:
-
+        
+        thread_id = str(thread_id)
         thread_type = "emails"
         thread_name = escape(project_id+thread_id.split('@')[0])
         #aliase_id, mailaddress = aliase.replace('<', ' ').replace('>', ' ').split()
@@ -401,6 +412,9 @@ def saveMessagetocsv(messages, csv_file, element):
     author_name = []
     message_text = []
     timestamp = []
+    subject = []
+    reply_to = []
+    references = []
     global counter_thread
     global dict_thread
     global counter_message
@@ -428,30 +442,42 @@ def saveMessagetocsv(messages, csv_file, element):
         #print(message_id[-1])
 
         if "references" in message:
-            reference = message["references"].split()[-1]
+            references.append(message["references"].split())
+            reference = message["references"].split()[0] ###########
             if reference in dict_thread:
                 thread_no = dict_thread[reference]
-                thread_id.append(escape(element+"#"+str(thread_no)+"#"+message["references"].split()[-1]))
+                thread_id.append(escape(element+"#"+str(thread_no)+"#"+message["references"].split()[0]))
             else:
                 counter_thread+= 1
                 thread_no = counter_thread
                 dict_thread[reference] = thread_no
-                thread_id.append(escape(element+"#"+str(thread_no)+"#"+message["references"].split()[-1]))
+                thread_id.append(escape(element+"#"+str(thread_no)+"#"+message["references"].split()[0]))
         elif "message-id" in message:
+            references.append(np.nan)
             reference = message["message-id"]
             counter_thread+= 1
             thread_no = counter_thread
             dict_thread[reference] = thread_no
             thread_id.append(escape(element+"#"+str(thread_no)+"#"+message["message-id"]))
         else:
+            references.append(np.nan)
             counter_thread+= 1
             thread_no = counter_thread
             dict_thread[reference] = thread_no
             thread_id.append(escape(element+"#"+str(thread_no)+"#"))
         
-        
 
         message_text.append(escape(message.__str__()))
+
+        if "subject" in message:
+            subject.append(escape(message["subject"]))
+        else:
+            subject.append("")
+
+        if 'In-Reply-To' in message:
+            reply_to.append(escape(message['In-Reply-To']))
+        else:
+            reply_to.append("")
 
         if "date" in message:
             try:
@@ -486,19 +512,26 @@ def saveMessagetocsv(messages, csv_file, element):
     df_message["author_name"] = pd.Series(author_name)
     df_message["timestamp" ] = pd.Series(timestamp)#.apply(lambda x: pd.Timestamp(x))
     df_message["message_text" ] = pd.Series(message_text)
+    df_message["subject"] = pd.Series(subject)
+    df_message["reply_to"] = pd.Series(reply_to)
+    df_message["mail_references"] = pd.Series(str(references))
     
     df_message.to_csv(csv_file)
+
+    #print(message.keys())
     return df_message
     
 def dataframe_to_psql(data1):
     
     df_psql = data1.astype(str)
+    df_psql['timestamp'] = df_psql['timestamp'].apply(lambda x: x.replace('NaT',"NULL"))
     for col in df_psql.columns.values :
         df_psql[col]= df_psql[col].apply(lambda x : x.encode('utf-8','ignore').decode("utf-8").replace("\x00", "\uFFFD"))
-    df_psql.to_sql(name='message', con = psql_engine, if_exists= 'append', index= False,chunksize=1)
+        df_psql[col]= df_psql[col].apply(lambda x : "NULL" if x=='nan' else x)
+    df_psql = df_psql.drop(df_psql[df_psql['message_id']=="NULL"].index)
+    df_psql.to_sql(name='message', con=psql_engine, if_exists= 'append', index= False, chunksize=1)
 
     print("Data Saved to psql!")
-
 
 # Main Function
 global counter_thread
@@ -522,10 +555,10 @@ for proj_id in result:
     projs.add(proj_id[0])
 conn.commit()
     
-df_all = pd.DataFrame(columns =["message_id", "thread_id", "author_aliase_id", "author_name", "receivers_name", "message_text", "timestamp" ])
+df_all = pd.DataFrame(columns =["message_id", "thread_id", "author_aliase_id", "author_name", "receivers_name", "message_text", "timestamp", "subject", "reply_to" ])
 
 #for element in filelist_in[11:12]:
-for element in filelist_in:
+for element in tqdm(filelist_in):
     
     print("Starting Folder:", element)
     counter_thread = 0
@@ -536,7 +569,7 @@ for element in filelist_in:
 
     # Project name and write the log
     list_out=open("filelist.txt","w+")
-    if ("-commit" in element) or ("-dev" in element):
+    if ("-commit" in element) or ("-dev" in element)or ("-psc" in element)or ("-discuss" in element):
         pjname = element.split("-")[0]
     elif ("_commit" in element) or ("_dev" in element):
         pjname = element.split("_")[0]
@@ -563,9 +596,14 @@ for element in filelist_in:
     #    command = "gunzip "+f_gz_dir+' '+DIR+"/"+element+"/txtfile/"
     #    print(command)
     #    os.system(command)
-    df_proj = pd.DataFrame(columns =["message_id", "thread_id", "author_aliase_id", "author_name", "receivers_name", "message_text", "timestamp" ])
+    df_proj = pd.DataFrame(columns =["message_id", "thread_id", "author_aliase_id", "author_name", "receivers_name", "message_text", "timestamp", "subject", "reply_to" ])
     txtlist = os.listdir(DIR+"/"+element)
 
+    for fname in txtlist:
+        if '.gz' in fname:
+            txtname = un_gz(DIR+"/"+element+"/"+fname)
+            
+    txtlist = os.listdir(DIR+"/"+element)
     for file_month in txtlist:
         
         if not ('.txt' in file_month):
@@ -591,7 +629,7 @@ for element in filelist_in:
         except BaseException as e:
             print(e)
 
-        df_proj = df_proj.append(df_thismonth, ignore_index = True).drop_duplicates()
+        df_proj = df_proj.append(df_thismonth, ignore_index = True).drop_duplicates().dropna(how ='all', axis=0)
     
     checkAliase(conn, element_messages)
     add_thread(df_proj, pjname)
@@ -601,12 +639,13 @@ for element in filelist_in:
     df_all = df_all.append(df_proj, ignore_index = True)
     df_proj.to_csv(csv_file)
     # Drop Timezone!!!
-    df_proj["timestamp"] = df_proj["timestamp"].apply(lambda x: pd.Timestamp(x).tz_localize(None))    
+    df_proj["timestamp"] = df_proj["timestamp"].apply(lambda x: pd.Timestamp(x).tz_localize(None)).fillna(np.nan)
+    #df_proj["timestamp"] = df_proj["timestamp"].apply(lambda x: '' if pd.isnull(x) else x)
 
     try:
-        pass
+    #    pass
         # SAVE TO psql HERE!!!!!!!!!!!!
-    #    dataframe_to_psql(df_proj)
+        dataframe_to_psql(df_proj)
     except BaseException as err:
         print(err)
         print(pjname)
@@ -614,4 +653,5 @@ for element in filelist_in:
 
     gc.collect()
 
-#df_all.to_csv('emails_all.csv')
+df_all.to_csv('emails_all.csv')
+
