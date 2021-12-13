@@ -21,6 +21,10 @@ with psql_engine.connect() as conn:
 with psql_engine.connect() as conn:
     #count_num = 0
     for thisid in tqdm(df_aliase['aliase_id'].values) :
-        sql = """ DELETE FROM aliase WHERE aliase_id='%s'""" %(escape(thisid))
-        conn.execute(sql)
+        try:
+            sql = """ DELETE FROM aliase WHERE aliase_id='%s'""" %(escape(thisid))
+            conn.execute(sql)
+        except BaseException as err:
+            print(err)
+            continue
         #count_num+= 1
