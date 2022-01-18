@@ -442,7 +442,7 @@ def saveMessagetocsv(messages, csv_file, element):
         #print(message_id[-1])
 
         if "references" in message:
-            references.append(message["references"].split())
+            references.append(str(message["references"].split()))
             reference = message["references"].split()[0] ###########
             if reference in dict_thread:
                 thread_no = dict_thread[reference]
@@ -514,7 +514,7 @@ def saveMessagetocsv(messages, csv_file, element):
     df_message["message_text" ] = pd.Series(message_text)
     df_message["subject"] = pd.Series(subject)
     df_message["reply_to"] = pd.Series(reply_to)
-    df_message["mail_references"] = pd.Series(str(references))
+    df_message["mail_references"] = pd.Series(references)
     
     df_message.to_csv(csv_file)
 
